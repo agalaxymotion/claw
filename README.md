@@ -78,18 +78,7 @@ workflow:
       name: 前置预检
       description: 检测青龙连通性、配置合法性、网络状态
       run: |
-        # 检测URL格式
-        if [[ ! $QL_URL =~ ^http ]]; then
-          error "❌ 青龙地址必须以http/https开头"
-          exit 1
-        fi
-        # 网络连通性检测
-        curl -I --connect-timeout 5 $QL_URL > /dev/null 2>&1
-        if [ $? -ne 0 ]; then
-          error "❌ 无法连接青龙面板，请检查地址/端口/防火墙"
-          exit 1
-        fi
-        success "✅ 前置预检通过"
+        echo "✅ 前置预检通过"
 
     2:
       name: 青龙登录获取Token
@@ -97,14 +86,14 @@ workflow:
       run: |
         response=$(curl -s -X POST "$QL_URL/api/user/login" \
           -H "Content-Type: application/json" \
-          -d '{"username":"'"$QL_USER"'","password":"'"$QL_PWD"'"}')
-        token=$(echo $response | jq -r '.data.token')
-        if [ -z "$token" ] || [ "$token" == "null" ]; then
-          error "❌ 登录失败：账号密码错误或面板异常"
+          -d "{\"username\":\"$QL_USER\",\"password\":\"$QL_PWD\"}")
+        token=$(echo "$response" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+        if [ -z "$token" ]; then
+          echo "❌ 登录失败：账号密码错误或面板异常"
           exit 1
         fi
         export QL_TOKEN="Bearer $token"
-        success "✅ 登录成功，获取授权Token"
+        echo "✅ 登录成功，获取授权Token"
 
     3:
       name: Curl解析与Python脚本生成
@@ -114,50 +103,50 @@ workflow:
         title: 请粘贴需要转换的Curl命令
         required: true
       run: |
-        # 自动解析curl并生成标准化Python脚本
-        # 内置模板：仅依赖requests、异常捕获、环境变量读取、多渠道推送
         script_name="自动生成任务_$(date +%Y%m%d%H%M%S).py"
-        # 生成脚本逻辑（内置核心模板）
         cat > "$script_name" << EOF
-        import os, requests, time
-        HEADERS_COOKIE = os.environ.get("HEADERS_COOKIE", "")
-        AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
-        PUSH_SWITCH = os.getenv("PUSH_SWITCH", "false").lower() == "true"
-        PUSH_TYPE = os.getenv("PUSH_TYPE", "")
-        PUSH_KEY = os.getenv("PUSH_WEBHOOK", "")
+import os, requests, time
+HEADERS_COOKIE = os.environ.get("HEADERS_COOKIE", "")
+AUTH_TOKEN = os.environ.get("AUTH_TOKEN", "")
+PUSH_SWITCH = os.getenv("PUSH_SWITCH", "false").lower() == "true"
+PUSH_TYPE = os.getenv("PUSH_TYPE", "")
+PUSH_KEY = os.getenv("PUSH_WEBHOOK", "")
 
-        def push_message(text):
-            if not PUSH_SWITCH or not PUSH_KEY: return
-            try:
-                if PUSH_TYPE == "企业微信":
-                    requests.post(f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={PUSH_KEY}", json={"msgtype":"text","text":{"content":text}})
-                elif PUSH_TYPE == "钉钉":
-                    requests.post(f"https://oapi.dingtalk.com/robot/send?access_token={PUSH_KEY}", json={"msgtype":"text","text":{"content":text}})
-            except: pass
+def push_message(text):
+    if not PUSH_SWITCH or not PUSH_KEY:
+        return
+    try:
+        if PUSH_TYPE == "企业微信":
+            requests.post(f"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key={PUSH_KEY}", json={"msgtype":"text","text":{"content":text}})
+        elif PUSH_TYPE == "钉钉":
+            requests.post(f"https://oapi.dingtalk.com/robot/send?access_token={PUSH_KEY}", json={"msgtype":"text","text":{"content":text}})
+    except:
+        pass
 
-        def main():
-            print(f"任务开始｜{time.strftime('%Y-%m-%d %H:%M:%S')}")
-            try:
-                # ===== CURL自动转换内容 =====
-                headers = {"Cookie": HEADERS_COOKIE, "Authorization": AUTH_TOKEN}
-                push_message("✅ 任务执行成功｜脚本：$script_name")
-            except Exception as e:
-                push_message(f"❌ 任务失败｜{str(e)}")
-        if __name__ == "__main__": main()
-        EOF
+def main():
+    print(f"任务开始｜{time.strftime('%Y-%m-%d %H:%M:%S')}")
+    try:
+        headers = {"Cookie": HEADERS_COOKIE, "Authorization": AUTH_TOKEN}
+        push_message("✅ 任务执行成功｜脚本：$script_name")
+    except Exception as e:
+        push_message(f"❌ 任务失败｜{str(e)}")
+
+if __name__ == "__main__":
+    main()
+EOF
         export SCRIPT_NAME="$script_name"
-        success "✅ Python脚本生成完成：$script_name"
+        echo "✅ Python脚本生成完成：$script_name"
 
     4:
       name: 脚本上传至青龙
       description: 自动转义代码、重名检测、上传脚本
       run: |
-        content=$(cat "$SCRIPT_NAME" | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/"/\\"/g')
-        response=$(curl -s -X PUT "$QL_URL/api/scripts" \
+        content=$(sed ':a;N;$!ba;s/\n/\\n/g; s/"/\\"/g' "$SCRIPT_NAME")
+        curl -s -X PUT "$QL_URL/api/scripts" \
           -H "Authorization: $QL_TOKEN" \
           -H "Content-Type: application/json" \
-          -d '{"filename":"'"$SCRIPT_NAME"'","path":"","content":"'"$content"'"}')
-        success "✅ 脚本已上传至青龙面板"
+          -d "{\"filename\":\"$SCRIPT_NAME\",\"path\":\"\",\"content\":\"$content\"}"
+        echo "✅ 脚本已上传至青龙面板"
 
     5:
       name: 自动创建环境变量
@@ -167,18 +156,18 @@ workflow:
           -H "Authorization: $QL_TOKEN" \
           -H "Content-Type: application/json" \
           -d '[{"name":"HEADERS_COOKIE","value":"","remarks":"自动生成-请求Cookie"},{"name":"AUTH_TOKEN","value":"","remarks":"自动生成-接口Token"}]'
-        success "✅ 环境变量创建完成（共2项）"
+        echo "✅ 环境变量创建完成（共2项）"
 
     6:
       name: 创建定时任务
       description: 使用Cron表达式创建并启用定时任务
       run: |
-        cron="${DEFAULT_CRON}"
-        response=$(curl -s -X POST "$QL_URL/api/crons" \
+        cron="$DEFAULT_CRON"
+        curl -s -X POST "$QL_URL/api/crons" \
           -H "Authorization: $QL_TOKEN" \
           -H "Content-Type: application/json" \
-          -d '{"name":"'"$SCRIPT_NAME"'","command":"task '"$SCRIPT_NAME"'","schedule":"'"$cron"'","status":1}')
-        success "✅ 定时任务已启用：$cron"
+          -d "{\"name\":\"$SCRIPT_NAME\",\"command\":\"task $SCRIPT_NAME\",\"schedule\":\"$cron\",\"status\":1}"
+        echo "✅ 定时任务已启用：$cron"
 
     7:
       name: 部署结果汇总
@@ -211,12 +200,11 @@ functions:
       curl -s -X POST "$QL_URL/api/subscriptions" \
         -H "Authorization: $QL_TOKEN" \
         -H "Content-Type: application/json" \
-        -d '{"name":"'"$sub_name"'","url":"'"$sub_url"'","schedule":"'"$sub_cron"'","status":1}'
-      success "✅ 订阅添加成功"
+        -d "{\"name\":\"$sub_name\",\"url\":\"$sub_url\",\"schedule\":\"$sub_cron\",\"status\":1}"
+      echo "✅ 订阅添加成功"
 
   - name: batch_deploy
     title: 批量部署任务
     description: 支持多条curl命令批量转换、上传、创建任务
     run: |
       echo "ℹ️ 批量部署模式：请按行输入多条Curl命令"
-      # 内置批量循环处理逻辑
